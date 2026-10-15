@@ -1,0 +1,19 @@
+CONFIG_IDF_TARGET="esp32s3"
+
+# USB-MIDI (TinyUSB) - one MIDI interface, nothing else
+CONFIG_TINYUSB_MIDI_COUNT=1
+
+# Logs go to UART0 (the "UART"/"COM" USB port on DevKit boards).
+# The native USB port (GPIO19/20) is fully owned by TinyUSB for MIDI.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# 1 ms RTOS tick, optimise for speed (low latency)
+CONFIG_FREERTOS_HZ=1000
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# Works on every ESP32-S3 module (4/8/16 MB flash)
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# Longer retrigger mask - stops the kick piezo double-triggering
+CONFIG_DRUMS_MASK_TIME_MS=70

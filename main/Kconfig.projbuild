@@ -1,0 +1,275 @@
+menu "ESP Drums configuration"
+
+    # ---------------------------------------------------------------------
+    menu "MIDI"
+        config DRUMS_MIDI_CHANNEL
+            int "MIDI channel (1-16, General MIDI drums = 10)"
+            range 1 16
+            default 10
+
+        config DRUMS_NOTE_OFF_MS
+            int "Send Note-Off this many ms after Note-On"
+            range 5 1000
+            default 50
+            help
+                Drum VSTs ignore Note-Off, but some DAWs/recorders want proper
+                note lengths, so a Note-Off is sent automatically.
+    endmenu
+
+    # ---------------------------------------------------------------------
+    menu "Hit detection (all pads)"
+        config DRUMS_SCAN_TIME_MS
+            int "Scan time (ms) - peak search window after the signal crosses the threshold"
+            range 1 10
+            default 3
+            help
+                After the threshold is crossed the firmware looks for the highest
+                peak for this long. The peak becomes the velocity. Longer = more
+                accurate velocity, but more latency.
+
+        config DRUMS_MASK_TIME_MS
+            int "Mask (retrigger) time (ms)"
+            range 5 200
+            default 40
+            help
+                After a hit the same pad ignores everything for this long, so the
+                ringing of the piezo does not cause double triggers.
+                Lower = faster rolls possible, higher = fewer double triggers.
+
+        config DRUMS_DYN_THRESHOLD_PERCENT
+            int "Dynamic threshold after mask (% of last peak)"
+            range 0 100
+            default 50
+            help
+                After the mask time the trigger threshold starts at this
+                percentage of the previous peak and linearly decays back to the
+                normal threshold. Rejects late ringing after hard hits.
+                0 = disabled.
+
+        config DRUMS_DYN_DECAY_MS
+            int "Dynamic threshold decay time (ms)"
+            range 1 1000
+            default 100
+
+        config DRUMS_VELOCITY_CURVE
+            int "Velocity curve exponent x100 (100 = linear)"
+            range 20 400
+            default 100
+            help
+                velocity = 1 + 126 * (normalised_peak ^ (curve / 100))
+                  < 100 : more sensitive, soft hits get louder (log-like)
+                  = 100 : linear
+                  > 100 : harder to get loud hits (exponential)
+
+        config DRUMS_CROSSTALK_PERCENT
+            int "Crosstalk rejection (% of a louder hit on another pad, 0 = off)"
+            range 0 100
+            default 20
+            help
+                If a pad is hit and, within the crosstalk window, another pad
+                registers a hit weaker than this percentage of the first one
+                (both normalised to their own "max peak"), the weak hit is
+                treated as vibration crosstalk and is dropped.
+
+        config DRUMS_CROSSTALK_WINDOW_MS
+            int "Crosstalk window (ms)"
+            range 1 100
+            default 10
+    endmenu
+
+    # ---------------------------------------------------------------------
+    menu "Pad 1 - Kick"
+        config DRUMS_KICK_GPIO
+            int "GPIO (must be ADC1: GPIO1..GPIO10)"
+            range 1 10
+            default 4
+        config DRUMS_KICK_NOTE
+            int "MIDI note"
+            range 0 127
+            default 36
+        config DRUMS_KICK_THRESHOLD
+            int "Threshold (ADC counts 0-4095)"
+            range 1 4095
+            default 150
+        config DRUMS_KICK_MAX_PEAK
+            int "Max peak (ADC counts that give velocity 127)"
+            range 2 4095
+            default 2500
+    endmenu
+
+    menu "Pad 2 - Snare"
+        config DRUMS_SNARE_GPIO
+            int "GPIO (must be ADC1: GPIO1..GPIO10)"
+            range 1 10
+            default 5
+        config DRUMS_SNARE_NOTE
+            int "MIDI note"
+            range 0 127
+            default 38
+        config DRUMS_SNARE_THRESHOLD
+            int "Threshold (ADC counts 0-4095)"
+            range 1 4095
+            default 120
+        config DRUMS_SNARE_MAX_PEAK
+            int "Max peak (ADC counts that give velocity 127)"
+            range 2 4095
+            default 2500
+    endmenu
+
+    menu "Pad 3 - Hi-Hat"
+        config DRUMS_HIHAT_GPIO
+            int "GPIO (must be ADC1: GPIO1..GPIO10)"
+            range 1 10
+            default 6
+        config DRUMS_HIHAT_NOTE_CLOSED
+            int "MIDI note when pedal is CLOSED"
+            range 0 127
+            default 42
+        config DRUMS_HIHAT_NOTE_OPEN
+            int "MIDI note when pedal is OPEN"
+            range 0 127
+            default 46
+        config DRUMS_HIHAT_THRESHOLD
+            int "Threshold (ADC counts 0-4095)"
+            range 1 4095
+            default 120
+        config DRUMS_HIHAT_MAX_PEAK
+            int "Max peak (ADC counts that give velocity 127)"
+            range 2 4095
+            default 2500
+    endmenu
+
+    menu "Pad 4 - Crash"
+        config DRUMS_CRASH_GPIO
+            int "GPIO (must be ADC1: GPIO1..GPIO10)"
+            range 1 10
+            default 7
+        config DRUMS_CRASH_NOTE
+            int "MIDI note"
+            range 0 127
+            default 49
+        config DRUMS_CRASH_THRESHOLD
+            int "Threshold (ADC counts 0-4095)"
+            range 1 4095
+            default 120
+        config DRUMS_CRASH_MAX_PEAK
+            int "Max peak (ADC counts that give velocity 127)"
+            range 2 4095
+            default 2500
+    endmenu
+
+    menu "Pad 5 - Tom"
+        config DRUMS_TOM_GPIO
+            int "GPIO (must be ADC1: GPIO1..GPIO10)"
+            range 1 10
+            default 8
+        config DRUMS_TOM_NOTE
+            int "MIDI note (48 = Hi-Mid Tom, 45 = Low Tom, 43 = Floor Tom)"
+            range 0 127
+            default 48
+        config DRUMS_TOM_THRESHOLD
+            int "Threshold (ADC counts 0-4095)"
+            range 1 4095
+            default 120
+        config DRUMS_TOM_MAX_PEAK
+            int "Max peak (ADC counts that give velocity 127)"
+            range 2 4095
+            default 2500
+    endmenu
+
+    # ---------------------------------------------------------------------
+    menu "Hi-Hat pedal (open/close switch)"
+        choice DRUMS_PEDAL_MODE
+            prompt "Pedal input type"
+            default DRUMS_PEDAL_MODE_GPIO
+            help
+                How the hi-hat open/close switch is read.
+
+            config DRUMS_PEDAL_MODE_GPIO
+                bool "Digital input (TTP223 touch module, footswitch, button)"
+                help
+                    Reads a plain digital signal. Use this for a TTP223-style
+                    touch module (OUT pin), or later a real footswitch/pedal.
+
+            config DRUMS_PEDAL_MODE_TOUCH
+                bool "ESP32-S3 built-in capacitive touch (bare wire / foil / metal plate)"
+                help
+                    Uses the ESP32-S3 internal touch peripheral. Connect just a
+                    wire to a piece of metal/foil. Pin must be GPIO1..GPIO14.
+        endchoice
+
+        config DRUMS_PEDAL_GPIO
+            int "Pedal GPIO"
+            range 0 48
+            default 9
+            help
+                Digital mode: any free GPIO. Touch mode: GPIO1..GPIO14 only
+                (touch channel number = GPIO number) and not one of the pad pins.
+
+        config DRUMS_PEDAL_ACTIVE_LOW
+            bool "Digital input is active LOW (switch to GND, internal pull-up)"
+            depends on DRUMS_PEDAL_MODE_GPIO
+            default n
+            help
+                n: input is HIGH when active (TTP223 default) -> internal pull-down.
+                y: input is LOW when active (footswitch between pin and GND)
+                   -> internal pull-up.
+
+        config DRUMS_TOUCH_THRESHOLD_PERMILLE
+            int "Touch threshold (per-mille of baseline, 20 = 2%)"
+            depends on DRUMS_PEDAL_MODE_TOUCH
+            range 1 500
+            default 20
+
+        config DRUMS_PEDAL_CLOSED_WHEN_ACTIVE
+            bool "Sensor ACTIVE (touched / pressed) = hi-hat CLOSED"
+            default y
+            help
+                y: touching/pressing the sensor = foot down = hi-hat closed.
+                n: reversed (useful for normally-closed footswitches).
+
+        config DRUMS_PEDAL_DEBOUNCE_MS
+            int "Debounce time (ms)"
+            range 0 100
+            default 10
+
+        config DRUMS_PEDAL_CHICK_ENABLE
+            bool "Send 'pedal chick' note when the hi-hat closes"
+            default y
+
+        config DRUMS_PEDAL_CHICK_NOTE
+            int "Pedal chick MIDI note"
+            depends on DRUMS_PEDAL_CHICK_ENABLE
+            range 0 127
+            default 44
+
+        config DRUMS_PEDAL_CHICK_VELOCITY
+            int "Pedal chick velocity"
+            depends on DRUMS_PEDAL_CHICK_ENABLE
+            range 1 127
+            default 80
+
+        config DRUMS_PEDAL_SEND_CC4
+            bool "Also send CC#4 (foot controller): 127 = closed, 0 = open"
+            default y
+            help
+                EZdrummer, Superior Drummer, Addictive Drums, SSD, etc. use CC4
+                for hi-hat openness.
+    endmenu
+
+    # ---------------------------------------------------------------------
+    menu "Debug / calibration"
+        config DRUMS_LOG_HITS
+            bool "Log every hit (pad, peak, velocity) on the UART console"
+            default y
+
+        config DRUMS_LOG_LEVELS
+            bool "Print live signal levels of all pads every 250 ms (calibration mode)"
+            default n
+            help
+                Prints the highest signal seen on every pad during the last
+                250 ms. Use it to see the noise floor (-> threshold) and the
+                hardest hit (-> max peak).
+    endmenu
+
+endmenu
