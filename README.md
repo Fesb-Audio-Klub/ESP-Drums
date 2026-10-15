@@ -42,34 +42,23 @@ MIDI channel: **10** (General MIDI drums).
 
 ### 2.1 Piezo pads (the same circuit for all 5)
 
-A piezo can produce **tens of volts** on a hard hit. Never connect it straight to the pin.
+A piezo can produce high voltages on a hard hit. Never connect it straight to the pin without a load and current-limiting resistor.
 
 ```
-                                   D1  (BAT85 / BAT43 / 1N5819 Schottky)
-                                  3V3 ──|◄──┐   (cathode/stripe toward 3V3)
-                                            │
- Piezo RED (+) ──┬────────[ R2 1 kΩ ]───────┼──────────►  GPIOx (4/5/6/7/8)
-                 │                          │
-              [ R1 1 MΩ ]                   └──|◄── GND
-                 │                         D2  (stripe toward GPIO, anode to GND)
- Piezo BLACK (–) ┴─────────────────────────────────────►  GND
+ Piezo RED (+) ──┬────────[ R2: 1 kΩ ]───────►  GPIOx (4/5/6/7/8)
+                 │
+            [ R1: 1 MΩ ]
+                 │
+ Piezo BLACK (–) ┴───────────────────────────►  GND
 ```
 
 | Part | Value | Purpose |
 |------|-------|---------|
-| R1   | 1 MΩ (470 kΩ–1 MΩ) | Load and discharge resistor across the piezo. A lower value gives a weaker signal and less ringing. |
-| R2   | 1 kΩ (up to 10 kΩ) | Limits the current into the clamp diodes. |
-| D1   | Schottky to 3V3 | Clamps positive spikes to about 3.5 V. |
-| D2   | Schottky to GND | Clamps the negative half-wave. |
+| R1   | 1 MΩ  | Parallel load and discharge resistor across the piezo. Bleeds off voltage and dampens ringing. |
+| R2   | 1 kΩ  | Series resistor before the ESP32 input pin. Limits current into the ESP32 GPIO. |
 
-Per pad: **1× 1 MΩ, 1× 1 kΩ, 2× Schottky diodes** (BAT85, BAT43, BAT46, 1N5819, etc.).
+Per pad: **1× 1 MΩ resistor (in parallel), 1× 1 kΩ resistor (in series)**.
 All piezo grounds go to an ESP32 **GND** pin.
-
-*Quick test without diodes:* use **R1 = 1 MΩ** and **R2 = 10 kΩ**. The chip's internal
-protection diodes then do the clamping. That's fine on a desk, but add the Schottkys for real playing.
-
-*Alternative to D1/D2:* a **3.3 V zener** from the GPIO to GND (stripe toward the GPIO).
-It is simpler, but it starts conducting around 2.5 V, which squashes the loudest hits a little.
 
 **Mounting tips:** glue the piezo to the middle of the pad (under foam or rubber), use a cable
 with a shield or twisted pair, and isolate the pads from each other mechanically (foam).
@@ -213,44 +202,94 @@ Each pad and piezo is different, so expect to tune.
 
 | Problem | Fix (menuconfig) |
 |---------|------------------|
-| One hit plays twice | Raise **Mask time** (40 → 60 ms) or **Dynamic threshold %** |
-| Fast rolls lose notes | Lower **Mask time** (e.g. 25 ms) |
-| Soft hits ignored | Lower that pad's **Threshold** |
-| Everything too loud or too quiet | Change the pad's **Max peak** |
-| Soft playing feels dead | **Velocity curve** < 100 (e.g. 60) |
-| Hard to control loud hits | **Velocity curve** > 100 (e.g. 150) |
-| Hitting one pad triggers another | Raise **Crosstalk %** (20 → 35), improve mechanical isolation |
-| Soft ghost notes vanish during loud hits | Lower **Crosstalk %**, or 0 = off |
-| Velocity feels random | Raise **Scan time** (3 → 4–5 ms) |
-| `ADC buffer overflow` in the log | Shouldn't happen. Turn off level printing. |
+| One hit plays twice | Raise **Mask time** (default is 70 ms in `sdkconfig.defaults`, 40 ms in Kconfig) or **Dynamic threshold %** (default 50%) |
+| Fast rolls lose notes | Lower **Mask time** (e.g. 25–40 ms) |
+| Soft hits ignored | Lower that pad's **Threshold** (default 150 for Kick, 120 for others) |
+| Everything too loud or too quiet | Change the pad's **Max peak** (default 2500 counts for velocity 127) |
+| Soft playing feels dead | Lower **Velocity curve** < 100 (e.g. 60–80) for log-like response |
+| Hard to control loud hits | Raise **Velocity curve** > 100 (e.g. 130–160) for exponential response |
+| Hitting one pad triggers another | Raise **Crosstalk %** (default 20% → 35%) or check mechanical pad isolation |
+| Soft ghost notes vanish during loud hits | Lower **Crosstalk %**, or set to 0 to disable |
+| Velocity feels random or inconsistent | Raise **Scan time** (default 3 ms → 4–5 ms) |
+| `ADC buffer overflow` in the log | Turn off live level printing (`CONFIG_DRUMS_LOG_LEVELS=n`) |
 
 ---
 
-## 6. How it works
+## 6. Architecture & Data Flow
+
+The firmware is designed for ultra-low latency and zero jitter by isolating real-time audio/MIDI processing on **Core 1** while offloading all formatting, serial UART logging, and diagnostic calculations to **Core 0**.
 
 ```
- piezo ─► clamp circuit ─► ADC1 (DMA, 40 kHz total = 8 kHz/pad)
-                                 │
-                       drum task (core 1, top priority)
-                                 │  per pad: IDLE → SCAN (find peak) → MASK
-                                 │  velocity = curve((peak - threshold)/(max_peak - threshold))
-                                 │  crosstalk filter, hi-hat note chosen from pedal state
-                                 ▼
-                           TinyUSB MIDI  ─► computer
+  Core 1 (Real-Time DSP & MIDI - Priority 23):
+  ===========================================
+   ADC1 Continuous DMA (40 kHz total: 5 pads @ 8 kHz)
+            │
+            ▼
+   drum_task (pinned to Core 1, alone)
+     ├─ process_sample() per ADC reading
+     │    ├─ Adaptive baseline tracking (24.8 fixed-point EMA)
+     │    ├─ State machine: IDLE → SCAN → MASK → Dynamic Decay
+     │    ├─ Peak detection over scan window (default 3 ms)
+     │    ├─ Crosstalk rejection relative to other recent pad peaks
+     │    ├─ Velocity calculation with power curve exponent
+     │    └─ Dynamic Hi-Hat note mapping (closed 42 / open 46)
+     ├─ Hi-Hat pedal polling & debounce (GPIO / touch)
+     ├─ Scheduled hardware Note-Off generation (default 50 ms)
+     ├─ TinyUSB MIDI packet transmission (Note-On, Note-Off, CC#4) ──► USB Host
+     └─ Drain TinyUSB incoming RX queue
+            │
+            │ Non-blocking FreeRTOS queue (drum_pads_event_queue, cap 32)
+            ▼
+  Core 0 (System & Logging - Priority 2):
+  ======================================
+   log_task (pinned to Core 0)
+     ├─ UART hit telemetry (pad, MIDI note, velocity, peak ADC counts)
+     ├─ Crosstalk rejection warnings
+     ├─ Pedal state transition logs (OPEN / CLOSED)
+     ├─ USB connection / disconnection events
+     ├─ ADC DMA buffer overflow monitoring
+     └─ Live calibration level monitor (optional 250 ms periodic print)
 ```
 
-| File | Content |
-|------|---------|
-| [`main/main.c`](main/main.c) | Startup, low-priority log task |
-| [`main/drum_pads.c`](main/drum_pads.c) | ADC DMA sampling, trigger state machine, velocity, crosstalk, note-off |
-| [`main/hihat_pedal.c`](main/hihat_pedal.c) | Hi-hat switch: TTP223/footswitch (GPIO) or built-in capacitive touch, debounce |
-| [`main/usb_midi.c`](main/usb_midi.c) | USB descriptors ("ESP Drums") and MIDI send helpers |
-| [`main/Kconfig.projbuild`](main/Kconfig.projbuild) | All menuconfig options |
-| [`sdkconfig.defaults`](sdkconfig.defaults) | Target esp32s3, USB-MIDI, console on UART, 1 kHz tick |
+---
 
-The trigger state machine, per pad and per sample:
-- **IDLE:** the signal (minus a slowly tracked baseline) goes above the threshold, so start a hit.
-- **SCAN (3 ms):** keep the highest value. At the end, send a Note-On with a velocity based on that peak.
-- **MASK (40 ms):** ignore the pad so the piezo's ringing can't retrigger it.
-- After the mask, the threshold starts at 50 % of the last peak and decays linearly back to normal
-  over 100 ms. Soft, fast notes still trigger, but ringing after hard hits doesn't.
+## 7. What's What in the Codebase
+
+| File | Role & Key Responsibilities |
+|------|-----------------------------|
+| [`main/main.c`](main/main.c) | **Firmware Entry & Logging Task**<br>• `app_main()`: Initializes USB-MIDI, hi-hat pedal, and drum pad engine in order, then spawns the logging task.<br>• `log_task`: Core 0 consumer task. Receives `drum_event_t` records from the FreeRTOS event queue. Formats and prints hit telemetry, crosstalk drops, pedal state changes, and USB status without ever blocking real-time hit detection.<br>• Live level monitoring: When `CONFIG_DRUMS_LOG_LEVELS` is enabled, samples the peak values seen across all pads every 250 ms. |
+| [`main/drum_pads.c`](main/drum_pads.c)<br>[`main/drum_pads.h`](main/drum_pads.h) | **ADC DMA Engine, Trigger State Machine & DSP**<br>• `drum_pads_start()`: Configures ADC1 continuous DMA mode (12-bit, 12 dB attenuation, 40 kHz total aggregate rate across 5 channels) and launches `drum_task` at `configMAX_PRIORITIES - 2` on Core 1.<br>• `process_sample()`: Runs the per-pad state machine (`ST_IDLE`, `ST_SCAN`, `ST_MASK`) and continuous baseline tracking.<br>• `is_crosstalk()`: Compares new hits against recent hits on other pads within `CONFIG_DRUMS_CROSSTALK_WINDOW_MS`. Rejects hits below `CONFIG_DRUMS_CROSSTALK_PERCENT` of the stronger hit.<br>• `peak_to_velocity()`: Normalizes the peak ADC amplitude between `threshold` and `max_peak`, applying `CONFIG_DRUMS_VELOCITY_CURVE` exponent.<br>• `handle_note_offs()`: Manages automated microsecond Note-Off timers (`CONFIG_DRUMS_NOTE_OFF_MS`).<br>• `drum_pads_take_levels()`: Atomic peak-level extraction for calibration mode. |
+| [`main/hihat_pedal.c`](main/hihat_pedal.c)<br>[`main/hihat_pedal.h`](main/hihat_pedal.h) | **Hi-Hat Pedal Driver & Controller Generator**<br>• Supports two hardware modes selectable in menuconfig:<br>&nbsp;&nbsp;1. **Digital GPIO:** Reads active HIGH (TTP223 capacitive touch module) or active LOW (footswitch to GND with internal pull-up).<br>&nbsp;&nbsp;2. **Capacitive Touch:** Uses the ESP32-S3 internal touch peripheral (`driver/touch_sens.h` on GPIO1–14). Calibrates an untouched baseline benchmark during boot and applies a per-mille threshold.<br>• `hihat_pedal_poll()`: Software debouncing filter (`CONFIG_DRUMS_PEDAL_DEBOUNCE_MS`).<br>• Transmits MIDI CC#4 (foot controller: 127 = closed, 0 = open) and optional "pedal chick" note (default note 44, velocity 80) when closed. |
+| [`main/usb_midi.c`](main/usb_midi.c)<br>[`main/usb_midi.h`](main/usb_midi.h) | **USB-MIDI Class-Compliant Stack (TinyUSB)**<br>• Uses the `espressif/esp_tinyusb` component.<br>• Sets up USB descriptors: Vendor ID / Product ID, Manufacturer (`"DIY"`), Product Name (`"ESP Drums"`), and MIDI Interface (`"ESP Drums MIDI"`).<br>• Exposes fast MIDI output helpers: `usb_midi_note_on()`, `usb_midi_note_off()`, and `usb_midi_cc()`.<br>• `usb_midi_drain_rx()`: Drains incoming host MIDI packets to prevent USB endpoint stalling. |
+| [`main/Kconfig.projbuild`](main/Kconfig.projbuild) | **Menuconfig Definitions**<br>• Exposes all settings under `ESP Drums configuration`: MIDI channel & Note-Off duration, scan/mask times, dynamic threshold & decay, velocity curve exponent, crosstalk rejection, per-pad GPIOs, MIDI notes, thresholds, max peaks, pedal mode, and debug logging toggles. |
+| [`sdkconfig.defaults`](sdkconfig.defaults) | **Default Project Presets**<br>• Target: ESP32-S3 (`CONFIG_IDF_TARGET="esp32s3"`).<br>• Enables TinyUSB MIDI count = 1.<br>• Directs system console to UART0 (freeing the native USB port for dedicated MIDI).<br>• Sets 1 kHz FreeRTOS tick rate (`CONFIG_FREERTOS_HZ=1000`) and `-O2` compiler optimization (`CONFIG_COMPILER_OPTIMIZATION_PERF=y`).<br>• Sets default retrigger mask to 70 ms (`CONFIG_DRUMS_MASK_TIME_MS=70`) to prevent kick piezo double-triggering out of the box. |
+
+---
+
+## 8. Trigger State Machine & Signal Processing Details
+
+Every pad is sampled independently at **8 kHz** (40 kHz aggregate across all 5 pads via ADC1 DMA). For every single ADC sample, `process_sample()` runs the following algorithm:
+
+1. **Adaptive Baseline Tracking:**
+   $$\text{sig} = \max\left(0, \; \text{raw} - (\text{baseline\_q8} \gg 8)\right)$$
+   When the pad is idle ($\text{sig} < \frac{\text{threshold}}{2}$), `baseline_q8` (24.8 fixed-point) slowly tracks thermal and electrical DC drift with an exponential moving average (time constant ~128 ms).
+2. **`ST_IDLE` (Waiting for hit):**
+   A hit begins when $\text{sig} \ge \text{active\_threshold}$.
+   - If in the dynamic decay window, $\text{active\_threshold}$ decays linearly:
+     $$\text{active\_threshold} = \max\left(\text{threshold}, \; \text{dyn\_start} \cdot \frac{\text{DECAY\_SAMPLES} - \text{decay\_pos}}{\text{DECAY\_SAMPLES}}\right)$$
+   - On trigger, pad switches to `ST_SCAN` and sets the scan counter to `CONFIG_DRUMS_SCAN_TIME_MS` (24 samples at 8 kHz = 3 ms).
+3. **`ST_SCAN` (Peak search window):**
+   - Tracks the highest ADC value reached by the initial wave.
+   - When the counter reaches 0:
+     - **Crosstalk Check:** Compares normalized amplitude against recent hits on other pads within `CONFIG_DRUMS_CROSSTALK_WINDOW_MS`. If dropped, posts `DRUM_EVT_XTALK`.
+     - **Hi-Hat Note Selection:** If pad is Hi-Hat, chooses closed (42) or open (46) based on `hihat_pedal_is_closed()`.
+     - **Velocity Calculation:**
+       $$\text{norm} = \text{clamp}\left(\frac{\text{peak} - \text{threshold}}{\text{max\_peak} - \text{threshold}}, \; 0.0, \; 1.0\right)$$
+       $$\text{velocity} = 1 + \left\lfloor 126 \cdot \left(\text{norm}\right)^{\frac{\text{curve}}{100}} + 0.5 \right\rfloor$$
+     - **MIDI Note-On:** Emitted immediately over USB-MIDI.
+     - **Note-Off Scheduled:** Scheduled for $t_{\text{now}} + \text{CONFIG\_DRUMS\_NOTE\_OFF\_MS}$.
+     - **Transition to `ST_MASK`:** Sets dynamic threshold start to $\text{peak} \cdot \frac{\text{CONFIG\_DRUMS\_DYN\_THRESHOLD\_PERCENT}}{100}$.
+4. **`ST_MASK` (Retrigger suppression):**
+   - The pad ignores all signals for `CONFIG_DRUMS_MASK_TIME_MS` (default 70 ms) to suppress physical mechanical piezo ringing.
+5. **Dynamic Threshold Decay:**
+   - Pad returns to `ST_IDLE`, with the threshold starting at $\text{dyn\_start}$ and linearly decaying back to base $\text{threshold}$ over `CONFIG_DRUMS_DYN_DECAY_MS` (default 100 ms). This rejects ringing tails after hard hits while allowing quick, deliberate follow-up hits.
